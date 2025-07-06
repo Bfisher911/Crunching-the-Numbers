@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crunching the Numbers: GPU vs. Egress Cost</title>
+    
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind CSS for rapid, responsive styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Chart.js for data visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        /* --- Custom Styles & Overrides --- */
+        /* This section allows for fine-tuning beyond Tailwind's utility classes. */
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f8fafc; /* Tailwind's gray-50 */
+        }
+
+        /* --- Custom Tooltip Styling --- */
+        /* The tooltip container is initially hidden and fades in with a transition. */
+        .tooltip-popup {
+            transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+        }
+
+        /* --- Custom Toggle Switch Styling --- */
+        /* Creates a visually appealing iOS-style toggle switch. */
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #3b82f6; /* Tailwind's blue-600 */
+        }
+
+        .toggle-checkbox:checked + .toggle-label .toggle-ball {
+            transform: translateX(100%);
+        }
+        
+        /* --- Chart Animation --- */
+        /* Ensures smooth transitions when chart data is updated. */
+        .chart-container {
+            transition: all 0.5s ease-in-out;
+        }
+
+        /* --- Cost Display Animation --- */
+        /* A subtle animation for the cost numbers to make them feel more dynamic. */
+        @keyframes counter-pop {
+            0% { transform: translateY(5px); opacity: 0.8; }
+            100% { transform: translateY(0); opacity: 1; }
+        }
+        .cost-value {
+            animation: counter-pop 0.4s ease-out;
+        }
+
+        /* --- Accordion Styling for Mobile --- */
+        /* Defines the styles for the accordion behavior on smaller screens. */
+        .accordion-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.5s ease-in-out;
+        }
+        
+        /* --- Accessibility Focus Rings --- */
+        /* Custom focus styles to ensure clear navigation for keyboard users. */
+        :focus-visible {
+            outline: 2px solid #3b82f6;
+            outline-offset: 2px;
+            border-radius: 0.25rem;
+        }
+    </style>
+</head>
+<body class="antialiased text-gray-800">
+
+    <!-- Main Container -->
+    <div class="container mx-auto p-4 md:p-8">
+
+        <!-- Header Section -->
+        <header class="text-center mb-8 md:mb-12">
+            <h1 class="text-3xl md:text-4xl font-bold text-gray-900">Crunching the Numbers</h1>
+            <p class="text-lg text-gray-600 mt-2">GPU Economics vs. Cloud Egress Fees</p>
+        </header>
+
+        <!-- Main Content Grid: Desktop is 2-column, Mobile is 1-column -->
+        <div class="grid grid-cols-1 lg:grid-cols-5 gap-8">
+
+            <!-- Left Column: Controls & Calculators -->
+            <div class="lg:col-span-2 space-y-8">
+                
+                <!-- Accordion Wrapper for Mobile -->
+                <div id="accordion-container" class="space-y-4 md:space-y-8">
+
+                    <!-- GPU Cost Calculator Section -->
+                    <div class="bg-white p-6 rounded-xl shadow-md accordion-item">
+                        <h2 id="gpu-accordion-header" class="text-xl font-semibold text-gray-900 flex justify-between items-center cursor-pointer lg:cursor-default" aria-expanded="true" aria-controls="gpu-calculator-content">
+                            <span>GPU Cost Calculator</span>
+                            <svg class="w-6 h-6 lg:hidden transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </h2>
+                        <div id="gpu-calculator-content" class="accordion-content mt-4" role="region">
+                            <div class="space-y-4">
+                                <!-- GPU Type Dropdown -->
+                                <div>
+                                    <label for="gpu-type" class="block text-sm font-medium text-gray-700">GPU Type</label>
+                                    <select id="gpu-type" name="gpu-type" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md" aria-label="Select GPU Type">
+                                        <option value="t4">NVIDIA T4</option>
+                                        <option value="v100">NVIDIA V100</option>
+                                        <option value="a100">NVIDIA A100 (40GB)</option>
+                                        <option value="h100">NVIDIA H100 (80GB)</option>
+                                    </select>
+                                </div>
+                                <!-- Hours Used Input -->
+                                <div>
+                                    <label for="gpu-hours" class="block text-sm font-medium text-gray-700">Hours Used (Per Job)</label>
+                                    <input type="number" id="gpu-hours" name="gpu-hours" value="10" min="0" class="mt-1 block w-full pl-3 pr-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" aria-label="Enter hours used for the GPU job">
+                                </div>
+                                <!-- GPU Cost Display -->
+                                <div class="text-right">
+                                    <p class="text-sm text-gray-500">Estimated Cost per Job</p>
+                                    <p id="gpu-cost-display" class="text-2xl font-bold text-blue-600">$0.00</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Egress Fee Estimator Section -->
+                    <div class="bg-white p-6 rounded-xl shadow-md accordion-item">
+                         <h2 id="egress-accordion-header" class="text-xl font-semibold text-gray-900 flex justify-between items-center cursor-pointer lg:cursor-default" aria-expanded="true" aria-controls="egress-calculator-content">
+                            <span>Egress Fee Estimator</span>
+                            <svg class="w-6 h-6 lg:hidden transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </h2>
+                        <div id="egress-calculator-content" class="accordion-content mt-4" role="region">
+                            <!-- Provider Tabs -->
+                            <div class="mb-4">
+                                <div class="border-b border-gray-200">
+                                    <nav id="provider-tabs" class="-mb-px flex space-x-4" aria-label="Cloud Providers">
+                                        <button data-provider="gcp" class="provider-tab whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-blue-500 text-blue-600" aria-current="page">GCP</button>
+                                        <button data-provider="aws" class="provider-tab whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">AWS</button>
+                                        <button data-provider="azure" class="provider-tab whitespace-nowrap py-3 px-1 border-b-2 font-medium text-sm border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300">Azure</button>
+                                    </nav>
+                                </div>
+                            </div>
+                            <div class="space-y-4">
+                                <!-- Region Selector -->
+                                <div>
+                                    <label for="egress-region" class="block text-sm font-medium text-gray-700">Egress Region</label>
+                                    <select id="egress-region" name="egress-region" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md" aria-label="Select egress region">
+                                        <!-- Options will be populated by JavaScript -->
+                                    </select>
+                                </div>
+                                <!-- GB Transferred Input -->
+                                <div>
+                                    <label for="egress-gb" class="block text-sm font-medium text-gray-700">Data Transferred (GB/month)</label>
+                                    <input type="number" id="egress-gb" name="egress-gb" value="100" min="0" class="mt-1 block w-full pl-3 pr-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm" aria-label="Enter gigabytes transferred per month">
+                                </div>
+                                <!-- Egress Cost Display -->
+                                <div class="text-right">
+                                    <p class="text-sm text-gray-500">Estimated Cost per Month</p>
+                                    <p id="egress-cost-display" class="text-2xl font-bold text-green-600">$0.00</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Optimization Toggles Section -->
+                    <div class="bg-white p-6 rounded-xl shadow-md accordion-item">
+                        <h2 id="optimization-accordion-header" class="text-xl font-semibold text-gray-900 flex justify-between items-center cursor-pointer lg:cursor-default" aria-expanded="true" aria-controls="optimization-content">
+                            <span>Cost Optimizations</span>
+                            <svg class="w-6 h-6 lg:hidden transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </h2>
+                        <div id="optimization-content" class="accordion-content mt-4 space-y-4" role="region">
+                            <!-- Spot VMs Toggle -->
+                            <div class="flex items-center justify-between">
+                                <span class="flex-grow flex flex-col">
+                                    <span class="text-sm font-medium text-gray-900">Use Spot VMs 
+                                        <button class="tooltip-trigger text-blue-500" data-tooltip="tooltip-spot" aria-label="More info on Spot VMs">(?)</button>
+                                    </span>
+                                    <span class="text-xs text-gray-500">Saves on GPU cost, risk of interruption.</span>
+                                </span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="spot-vms" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer"/>
+                                    <label for="spot-vms" class="toggle-label block overflow-hidden h-6 rounded-full bg-gray-300 cursor-pointer"></label>
+                                </div>
+                            </div>
+                            <!-- Batch Inference Toggle -->
+                            <div class="flex items-center justify-between">
+                                <span class="flex-grow flex flex-col">
+                                    <span class="text-sm font-medium text-gray-900">Batch Inference
+                                        <button class="tooltip-trigger text-blue-500" data-tooltip="tooltip-batch" aria-label="More info on Batch Inference">(?)</button>
+                                    </span>
+                                    <span class="text-xs text-gray-500">Improves GPU utilization, reduces idle time.</span>
+                                </span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="batch-inference" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer"/>
+                                    <label for="batch-inference" class="toggle-label block overflow-hidden h-6 rounded-full bg-gray-300 cursor-pointer"></label>
+                                </div>
+                            </div>
+                            <!-- Compression Toggle -->
+                            <div class="flex items-center justify-between">
+                                <span class="flex-grow flex flex-col">
+                                    <span class="text-sm font-medium text-gray-900">Enable Compression
+                                        <button class="tooltip-trigger text-blue-500" data-tooltip="tooltip-compression" aria-label="More info on Compression">(?)</button>
+                                    </span>
+                                    <span class="text-xs text-gray-500">Reduces data size, lowers egress fees.</span>
+                                </span>
+                                <div class="relative inline-block w-10 mr-2 align-middle select-none transition duration-200 ease-in">
+                                    <input type="checkbox" id="compression" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-4 appearance-none cursor-pointer"/>
+                                    <label for="compression" class="toggle-label block overflow-hidden h-6 rounded-full bg-gray-300 cursor-pointer"></label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Chart & Total -->
+            <div class="lg:col-span-3 bg-white p-6 rounded-xl shadow-md flex flex-col">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">Combined Cost Analysis</h2>
+                <div class="chart-container flex-grow min-h-[300px] md:min-h-[400px]">
+                    <canvas id="costChart"></canvas>
+                </div>
+                <div class="mt-6 pt-4 border-t border-gray-200 text-right">
+                    <p class="text-sm text-gray-500">Total Estimated Monthly Cost</p>
+                    <p id="total-cost-display" class="text-3xl font-bold text-purple-600">$0.00</p>
+                    <p id="savings-display" class="text-sm text-red-500 font-medium h-5 mt-1"></p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tooltip Pop-ups (hidden by default) -->
+    <div id="tooltip-spot" class="tooltip-popup fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center p-4 opacity-0 pointer-events-none" aria-hidden="true">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md relative transform scale-95">
+            <button class="tooltip-close absolute top-2 right-2 text-gray-500 hover:text-gray-800" aria-label="Close tooltip">&times;</button>
+            <h3 class="text-lg font-semibold mb-2">Spot VMs / Instances</h3>
+            <p class="text-sm text-gray-600">Spot Instances are unused compute capacity available at a steep discount compared to on-demand prices. The main drawback is that the cloud provider can reclaim this capacity with little notice, making them ideal for fault-tolerant, non-urgent workloads but risky for critical jobs.</p>
+        </div>
+    </div>
+
+    <div id="tooltip-batch" class="tooltip-popup fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center p-4 opacity-0 pointer-events-none" aria-hidden="true">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md relative transform scale-95">
+            <button class="tooltip-close absolute top-2 right-2 text-gray-500 hover:text-gray-800" aria-label="Close tooltip">&times;</button>
+            <h3 class="text-lg font-semibold mb-2">Batch Inference</h3>
+            <p class="text-sm text-gray-600">Instead of processing single data points as they arrive, batch inference groups them together and processes them in a single run. This maximizes GPU utilization by keeping it busy, reducing the idle time that you still pay for. It leads to higher throughput and lower cost per inference.</p>
+        </div>
+    </div>
+
+    <div id="tooltip-compression" class="tooltip-popup fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center p-4 opacity-0 pointer-events-none" aria-hidden="true">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md relative transform scale-95">
+            <button class="tooltip-close absolute top-2 right-2 text-gray-500 hover:text-gray-800" aria-label="Close tooltip">&times;</button>
+            <h3 class="text-lg font-semibold mb-2">Data Compression</h3>
+            <p class="text-sm text-gray-600">Egress fees are charged based on the amount of data leaving the cloud provider's network. By using algorithms (like Gzip or Zstandard) to compress data before transfer, you reduce its size, which directly lowers the data transfer volume and, consequently, the egress costs.</p>
+        </div>
+    </div>
+
+
+    <script>
+    // --- JAVASCRIPT LOGIC --- //
+    document.addEventListener('DOMContentLoaded', () => {
+
+        // --- DATA TABLES --- //
+        // These objects hold the core pricing and factor data.
+        // Instructors can easily modify these values to update the calculator.
+
+        const GPU_PRICES = {
+            // Prices are per hour for on-demand instances.
+            't4': 0.35,
+            'v100': 2.48,
+            'a100': 3.68, // Based on A100 40GB
+            'h100': 6.97, // Based on H100 80GB
+        };
+
+        const EGRESS_FEES = {
+            // Prices are per GB, often tiered. We use a representative value for simplicity.
+            // First 100GB/month are often free, this calculator assumes usage > 100GB.
+            'gcp': {
+                'US (East/West)': 0.085,
+                'Europe (West)': 0.08,
+                'Asia (Tokyo)': 0.12,
+            },
+            'aws': {
+                'US (East/West)': 0.09,
+                'Europe (Ireland)': 0.09,
+                'Asia (Tokyo)': 0.114,
+            },
+            'azure': {
+                'US (East/West)': 0.0875,
+                'Europe (West)': 0.0875,
+                'Asia (East)': 0.12,
+            }
+        };
+
+        const OPTIMIZATION_FACTORS = {
+            // These multipliers adjust the costs.
+            // A value of 0.4 means a 60% cost reduction.
+            'spotVms': 0.4,       // 60% savings on GPU cost
+            'batchInference': 0.8, // 20% savings on GPU cost (due to better utilization)
+            'compression': 0.3,   // 70% savings on Egress cost (assuming 3:1 compression)
+        };
+
+        // --- DOM ELEMENT REFERENCES --- //
+        // Caching element references for performance.
+        const elements = {
+            gpuType: document.getElementById('gpu-type'),
+            gpuHours: document.getElementById('gpu-hours'),
+            gpuCostDisplay: document.getElementById('gpu-cost-display'),
+            
+            providerTabs: document.getElementById('provider-tabs'),
+            activeProvider: 'gcp', // Default provider
+            egressRegion: document.getElementById('egress-region'),
+            egressGb: document.getElementById('egress-gb'),
+            egressCostDisplay: document.getElementById('egress-cost-display'),
+
+            spotVmsToggle: document.getElementById('spot-vms'),
+            batchInferenceToggle: document.getElementById('batch-inference'),
+            compressionToggle: document.getElementById('compression'),
+
+            totalCostDisplay: document.getElementById('total-cost-display'),
+            savingsDisplay: document.getElementById('savings-display'),
+            
+            costChartCanvas: document.getElementById('costChart'),
+        };
+        
+        // --- CHART INITIALIZATION --- //
+        let costChart;
+        const initChart = () => {
+            const ctx = elements.costChartCanvas.getContext('2d');
+            costChart = new Chart(ctx, {
+                type: 'bar', // Can be 'bar', 'line', etc.
+                data: {
+                    labels: ['Costs'],
+                    datasets: [
+                        {
+                            label: 'GPU Cost',
+                            data: [0],
+                            backgroundColor: 'rgba(59, 130, 246, 0.7)', // blue-500
+                            borderColor: 'rgba(59, 130, 246, 1)',
+                            borderWidth: 1
+                        },
+                        {
+                            label: 'Egress Cost',
+                            data: [0],
+                            backgroundColor: 'rgba(16, 185, 129, 0.7)', // green-500
+                            borderColor: 'rgba(16, 185, 129, 1)',
+                            borderWidth: 1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                callback: function(value) {
+                                    return '$' + value;
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Estimated Cost ($)'
+                            }
+                        },
+                        x: {
+                            grid: {
+                                display: false
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        };
+
+        // --- CALCULATION LOGIC --- //
+        
+        const calculateCosts = () => {
+            // 1. Get current input values
+            const gpuType = elements.gpuType.value;
+            const gpuHours = parseFloat(elements.gpuHours.value) || 0;
+            const egressGb = parseFloat(elements.egressGb.value) || 0;
+            const region = elements.egressRegion.value;
+
+            // 2. Get optimization toggles state
+            const useSpot = elements.spotVmsToggle.checked;
+            const useBatch = elements.batchInferenceToggle.checked;
+            const useCompression = elements.compressionToggle.checked;
+
+            // 3. Calculate Base Costs
+            const baseGpuCost = GPU_PRICES[gpuType] * gpuHours;
+            const baseEgressCost = EGRESS_FEES[elements.activeProvider][region] * egressGb;
+
+            // 4. Apply Optimizations
+            let optimizedGpuCost = baseGpuCost;
+            if (useSpot) {
+                optimizedGpuCost *= OPTIMIZATION_FACTORS.spotVms;
+            }
+            if (useBatch) {
+                optimizedGpuCost *= OPTIMIZATION_FACTORS.batchInference;
+            }
+
+            let optimizedEgressCost = baseEgressCost;
+            if (useCompression) {
+                optimizedEgressCost *= OPTIMIZATION_FACTORS.compression;
+            }
+
+            // For this model, we assume a job runs daily for a month for total cost.
+            // You can adjust this logic (e.g., add an input for # of jobs/month).
+            const totalGpuCost = optimizedGpuCost * 30; 
+            const totalEgressCost = optimizedEgressCost;
+            const totalCost = totalGpuCost + totalEgressCost;
+
+            // Calculate savings
+            const totalBaseCost = (baseGpuCost * 30) + baseEgressCost;
+            const savings = totalBaseCost - totalCost;
+
+
+            // 5. Update UI
+            updateDisplay(totalGpuCost, totalEgressCost, totalCost, savings);
+            updateChart(totalGpuCost, totalEgressCost);
+        };
+
+        // --- UI UPDATE FUNCTIONS --- //
+
+        const updateDisplay = (gpuCost, egressCost, totalCost, savings) => {
+            // Use requestAnimationFrame to ensure the animation re-triggers on value change.
+            requestAnimationFrame(() => {
+                elements.gpuCostDisplay.textContent = formatCurrency(gpuCost / 30); // Show per-job cost
+                elements.gpuCostDisplay.classList.add('cost-value');
+                
+                elements.egressCostDisplay.textContent = formatCurrency(egressCost);
+                elements.egressCostDisplay.classList.add('cost-value');
+
+                elements.totalCostDisplay.textContent = formatCurrency(totalCost);
+                elements.totalCostDisplay.classList.add('cost-value');
+
+                if (savings > 0) {
+                    elements.savingsDisplay.textContent = `You're saving ~${formatCurrency(savings)}/month!`;
+                } else {
+                    elements.savingsDisplay.textContent = '';
+                }
+            });
+
+            // Remove animation class after it runs to allow it to be re-added
+            setTimeout(() => {
+                elements.gpuCostDisplay.classList.remove('cost-value');
+                elements.egressCostDisplay.classList.remove('cost-value');
+                elements.totalCostDisplay.classList.remove('cost-value');
+            }, 400);
+        };
+
+        const updateChart = (gpuCost, egressCost) => {
+            costChart.data.datasets[0].data[0] = gpuCost.toFixed(2);
+            costChart.data.datasets[1].data[0] = egressCost.toFixed(2);
+            costChart.update();
+        };
+
+        const formatCurrency = (value) => {
+            return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
+        };
+
+        // --- EVENT HANDLERS --- //
+
+        // Populate region dropdown based on selected provider
+        const updateRegionDropdown = () => {
+            const provider = elements.activeProvider;
+            const regions = Object.keys(EGRESS_FEES[provider]);
+            elements.egressRegion.innerHTML = ''; // Clear existing options
+            regions.forEach(region => {
+                const option = document.createElement('option');
+                option.value = region;
+                option.textContent = region;
+                elements.egressRegion.appendChild(option);
+            });
+        };
+
+        // Handle provider tab switching
+        elements.providerTabs.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') {
+                const newProvider = e.target.dataset.provider;
+                if (newProvider !== elements.activeProvider) {
+                    // Update active provider state
+                    elements.activeProvider = newProvider;
+                    
+                    // Update tab styles
+                    document.querySelectorAll('.provider-tab').forEach(tab => {
+                        tab.classList.remove('border-blue-500', 'text-blue-600');
+                        tab.classList.add('border-transparent', 'text-gray-500', 'hover:text-gray-700', 'hover:border-gray-300');
+                        tab.setAttribute('aria-current', 'false');
+                    });
+                    e.target.classList.add('border-blue-500', 'text-blue-600');
+                    e.target.classList.remove('border-transparent', 'text-gray-500');
+                    e.target.setAttribute('aria-current', 'page');
+
+                    // Repopulate regions and recalculate
+                    updateRegionDropdown();
+                    calculateCosts();
+                }
+            }
+        });
+
+        // Tooltip handling
+        document.querySelectorAll('.tooltip-trigger').forEach(trigger => {
+            trigger.addEventListener('click', () => {
+                const tooltipId = trigger.dataset.tooltip;
+                const tooltip = document.getElementById(tooltipId);
+                tooltip.classList.remove('opacity-0', 'pointer-events-none');
+                tooltip.setAttribute('aria-hidden', 'false');
+                tooltip.querySelector('div').classList.remove('scale-95');
+            });
+        });
+
+        document.querySelectorAll('.tooltip-close').forEach(closer => {
+            closer.addEventListener('click', () => {
+                const tooltip = closer.closest('.tooltip-popup');
+                tooltip.classList.add('opacity-0', 'pointer-events-none');
+                tooltip.setAttribute('aria-hidden', 'true');
+                tooltip.querySelector('div').classList.add('scale-95');
+            });
+        });
+        
+        // Accordion handling for mobile
+        const setupAccordion = () => {
+            if (window.innerWidth < 1024) { // lg breakpoint in Tailwind
+                document.querySelectorAll('.accordion-item').forEach(item => {
+                    const header = item.querySelector('h2');
+                    const content = item.querySelector('.accordion-content');
+                    const icon = header.querySelector('svg');
+                    
+                    // Initially collapse all but the first
+                    if (item !== document.querySelector('.accordion-item')) {
+                        content.style.maxHeight = null;
+                        header.setAttribute('aria-expanded', 'false');
+                        icon.style.transform = 'rotate(0deg)';
+                    } else {
+                        content.style.maxHeight = content.scrollHeight + "px";
+                        header.setAttribute('aria-expanded', 'true');
+                        icon.style.transform = 'rotate(180deg)';
+                    }
+
+                    header.onclick = () => {
+                        const isExpanded = header.getAttribute('aria-expanded') === 'true';
+                        if (isExpanded) {
+                            content.style.maxHeight = null;
+                            header.setAttribute('aria-expanded', 'false');
+                            icon.style.transform = 'rotate(0deg)';
+                        } else {
+                            content.style.maxHeight = content.scrollHeight + "px";
+                            header.setAttribute('aria-expanded', 'true');
+                            icon.style.transform = 'rotate(180deg)';
+                        }
+                    };
+                });
+            } else {
+                // On desktop, ensure all are expanded
+                document.querySelectorAll('.accordion-content').forEach(content => {
+                    content.style.maxHeight = content.scrollHeight + "px";
+                });
+            }
+        };
+
+
+        // --- INITIALIZATION --- //
+
+        // Attach event listeners to all inputs to recalculate on change.
+        [
+            elements.gpuType, elements.gpuHours, elements.egressRegion, elements.egressGb,
+            elements.spotVmsToggle, elements.batchInferenceToggle, elements.compressionToggle
+        ].forEach(el => el.addEventListener('input', calculateCosts));
+
+        // Initial setup calls
+        initChart();
+        updateRegionDropdown();
+        calculateCosts();
+        setupAccordion();
+        
+        // Re-check accordion on window resize
+        window.addEventListener('resize', setupAccordion);
+    });
+    </script>
+</body>
+</html>
